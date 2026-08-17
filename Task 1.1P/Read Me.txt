@@ -1,0 +1,34 @@
+1. Short description of my system
+
+The system represents the porch and hallway lights of Linda's house.
+A push button is used as the input.
+When the button is pressed, both LEDs turn on.
+Porch LED remains on for 30 seconds.
+Hallway LED remains on for 60 seconds.
+Pins:
+Porch LED → D11
+Hallway LED → D10
+Button → D9
+INPUT_PULLUP is used for the button.
+The Arduino controls the LEDs through digital output pins.
+
+The porch light stays on for 30 seconds and the hallway light for 60 seconds.
+
+
+2. Explanation of code 
+
+setup():
+two LED pins as OUTPUT
+button pin as INPUT_PULLUP
+both LEDs initially OFF
+
+loop():
+Arduino continuously checks whether the button has been pressed. Because INPUT_PULLUP is used, the button press is detected when the input reads LOW.
+
+Light-control section
+Turn both LEDs on when the button is pressed, then:
+
+waits 30 seconds and turns the porch LED off;
+waits another 30 seconds and turns the hallway LED off.
+
+This gives the hallway a total ON time of 60 seconds.
