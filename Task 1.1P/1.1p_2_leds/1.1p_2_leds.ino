@@ -14,8 +14,6 @@ void setup()
 
 void loop()
 {
-  if (digitalRead(BUTTON) == LOW)
-  {
     // Turn both lights ON
     digitalWrite(PORCH_LED, HIGH);
     digitalWrite(HALLWAY_LED, HIGH);
