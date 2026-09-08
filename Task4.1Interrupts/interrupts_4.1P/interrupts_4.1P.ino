@@ -30,6 +30,7 @@ unsigned long lightOneStarted = 0;
 unsigned long lightTwoStarted = 0;
 
 
+// PIR interrupt
 void detectMotion() {
 
   unsigned long timeNow = millis();
@@ -41,6 +42,19 @@ void detectMotion() {
 }
 
 
+// Button interrupt
+void buttonPressed() {
+
+  unsigned long timeNow = millis();
+
+  if (timeNow - buttonTime >= BUTTON_COOLDOWN) {
+    buttonEvent = true;
+    buttonTime = timeNow;
+  }
+}
+
+
+// Switch both lights ON
 void switchLightsOn() {
 
   digitalWrite(LED1_PIN, HIGH);
@@ -75,11 +89,22 @@ void setup() {
     Serial.println("BH1750 not detected.");
   }
 
+
+  // PIR interrupt
   attachInterrupt(
     digitalPinToInterrupt(PIR_PIN),
     detectMotion,
     RISING
-  );                                      // interrupt starts on PIR signal
+  );
+
+
+  // Button interrupt
+  attachInterrupt(
+    digitalPinToInterrupt(BUTTON_PIN),
+    buttonPressed,
+    FALLING
+  );
+
 
   Serial.println("System ready.");
 }
@@ -87,6 +112,7 @@ void setup() {
 
 void loop() {
 
+  // PIR event
   if (motionEvent) {
 
     motionEvent = false;
@@ -99,13 +125,14 @@ void loop() {
     Serial.print(lightValue);
     Serial.println(" lux");
 
+
     if (lightValue < DARK_THRESHOLD) {
 
       Serial.println("Darkness detected.");
 
       switchLightsOn();
 
-      Serial.println("Lights switched ON.");
+      Serial.println("Lights switched ON by motion.");
 
     } else {
 
@@ -115,6 +142,20 @@ void loop() {
   }
 
 
+  // Button event
+  if (buttonEvent) {
+
+    buttonEvent = false;
+
+    Serial.println("Button pressed.");
+
+    switchLightsOn();
+
+    Serial.println("Lights switched ON by button.");
+  }
+
+
+  // LED1 timer
   if (lightOneRunning &&
       millis() - lightOneStarted >= LED1_TIME) {
 
@@ -125,6 +166,7 @@ void loop() {
   }
 
 
+  // LED2 timer
   if (lightTwoRunning &&
       millis() - lightTwoStarted >= LED2_TIME) {
 
@@ -134,5 +176,5 @@ void loop() {
     Serial.println("Second LED switched OFF after 60 seconds.");
   }
 
-  delay(50);                              // gives loop small checking time
+  delay(50);
 }
