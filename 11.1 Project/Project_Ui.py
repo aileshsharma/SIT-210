@@ -1,3 +1,4 @@
+
 import tkinter as tk
 from tkinter import ttk
 import serial
@@ -5,87 +6,138 @@ import json
 import csv
 import os
 import time
+import threading
+import urllib.request
+import urllib.parse
 from datetime import datetime
 
-# ==========================================
-# SERIAL CONFIGURATION
-# ==========================================
+
+# SETTINGS
+
 
 PORT = "/dev/ttyACM0"
 BAUD = 9600
 
+THINGSPEAK_WRITE_API_KEY = "XGOR29OD5GQM5GFN"
+
+THINGSPEAK_INTERVAL = 16
+
+LOG_FILE = "greenhouse_log.csv"
+
 ser = None
-last_message = ""
 pending_limits = None
-
-log_file = "greenhouse_log.csv"
-
-# ==========================================
-# DEFAULT THRESHOLDS
-# ==========================================
+last_upload = 0
+last_message = ""
 
 limits = {
-    "lux": 100.0,
-    "temp_low": 18.0,
-    "temp_high": 32.0,
-    "hum_low": 30.0,
-    "hum_high": 80.0,
-    "delta": 300.0
+    "lux": 100,
+    "temp_low": 18,
+    "temp_high": 32,
+    "hum_low": 30,
+    "hum_high": 80,
+    "delta": 300
 }
 
-# ==========================================
-# CONNECT TO ARDUINO
-# ==========================================
+
+# ARDUINO CONNECTION
+
 
 try:
-    ser = serial.Serial(
-        PORT,
-        BAUD,
-        timeout=0.1,
-        write_timeout=2
-    )
-
-    # Allow Arduino to restart after USB connection
+    ser = serial.Serial(PORT, BAUD, timeout=0.1)
     time.sleep(2)
-
     ser.reset_input_buffer()
-
     print("Arduino connected:", PORT)
 
-except serial.SerialException as e:
+except Exception as e:
     print("Arduino connection failed:", e)
 
-# ==========================================
+
 # CSV FILE
-# ==========================================
 
-if not os.path.exists(log_file):
 
-    with open(log_file, "w", newline="") as f:
-
-        writer = csv.writer(f)
-
+if not os.path.exists(LOG_FILE):
+    with open(LOG_FILE, "w", newline="") as file:
+        writer = csv.writer(file)
         writer.writerow([
-            "Time",
-            "Temperature",
-            "Humidity",
-            "Light Lux",
-            "Status"
+            "Time", "Temperature", "Humidity",
+            "Light Lux", "Status"
         ])
 
-# ==========================================
+
+# THINGSPEAK UPLOAD
+
+
+def upload_to_thingspeak(temperature, humidity, lux):
+    global last_upload
+
+    if not THINGSPEAK_WRITE_API_KEY or \
+       THINGSPEAK_WRITE_API_KEY == "XGOR29OD5GQM5GFN":
+        return
+
+    if time.monotonic() - last_upload < THINGSPEAK_INTERVAL:
+        return
+
+    last_upload = time.monotonic()
+
+    data = {
+        "api_key": THINGSPEAK_WRITE_API_KEY,
+        "field1": temperature,
+        "field2": humidity
+    }
+
+    if lux is not None:
+        data["field3"] = lux
+
+    encoded_data = urllib.parse.urlencode(data).encode()
+
+    def send_data():
+        try:
+            request = urllib.request.Request(
+                "https://api.thingspeak.com/update",
+                data=encoded_data
+            )
+
+            with urllib.request.urlopen(request, timeout=10) as response:
+                result = response.read().decode().strip()
+
+            if result != "0":
+                message = "ThingSpeak: Data uploaded"
+                colour = "green"
+            else:
+                message = "ThingSpeak: Update rejected"
+                colour = "red"
+
+            root.after(
+                0,
+                lambda: thingspeak_status.config(
+                    text=message, fg=colour
+                )
+            )
+
+            print("ThingSpeak response:", result)
+
+        except Exception as e:
+            print("ThingSpeak error:", e)
+
+            root.after(
+                0,
+                lambda: thingspeak_status.config(
+                    text="ThingSpeak: Upload failed",
+                    fg="red"
+                )
+            )
+
+    threading.Thread(target=send_data, daemon=True).start()
+
+
+
 # MAIN WINDOW
-# ==========================================
+
 
 root = tk.Tk()
-
 root.title("Smart Greenhouse Guardian")
-root.geometry("900x720")
+root.geometry("900x760")
 root.configure(bg="#edf2f7")
-
-# ==========================================
-# HEADER
-# ==========================================
 
 tk.Label(
     root,
@@ -103,19 +155,17 @@ connection_label = tk.Label(
     bg="#edf2f7",
     fg="green" if ser else "red"
 )
-
 connection_label.pack(pady=8)
 
-# ==========================================
-# SENSOR DISPLAY CARDS
-# ==========================================
+
+# SENSOR CARDS
+
 
 cards = tk.Frame(root, bg="#edf2f7")
 cards.pack(pady=15)
 
 
 def create_card(parent, title, unit):
-
     frame = tk.Frame(
         parent,
         bg="white",
@@ -163,9 +213,9 @@ temp_frame.grid(row=0, column=0, padx=8)
 hum_frame.grid(row=0, column=1, padx=8)
 lux_frame.grid(row=0, column=2, padx=8)
 
-# ==========================================
-# STATUS MESSAGES
-# ==========================================
+
+# STATUS LABELS
+
 
 light_status = tk.Label(
     root,
@@ -173,7 +223,6 @@ light_status = tk.Label(
     font=("Arial", 13, "bold"),
     bg="#edf2f7"
 )
-
 light_status.pack(pady=5)
 
 alert_status = tk.Label(
@@ -182,12 +231,19 @@ alert_status = tk.Label(
     font=("Arial", 13, "bold"),
     bg="#edf2f7"
 )
-
 alert_status.pack(pady=5)
 
-# ==========================================
+thingspeak_status = tk.Label(
+    root,
+    text="ThingSpeak: Waiting for data...",
+    font=("Arial", 11, "bold"),
+    bg="#edf2f7"
+)
+thingspeak_status.pack(pady=5)
+
+
 # THRESHOLD SETTINGS
-# ==========================================
+
 
 settings = tk.LabelFrame(
     root,
@@ -212,7 +268,6 @@ fields = [
 entries = {}
 
 for i, (label, key, default) in enumerate(fields):
-
     row = i // 3
     col = (i % 3) * 2
 
@@ -223,13 +278,10 @@ for i, (label, key, default) in enumerate(fields):
     ).grid(row=row, column=col, padx=5, pady=8)
 
     entry = tk.Entry(settings, width=9)
-
     entry.insert(0, default)
-
     entry.grid(row=row, column=col + 1, padx=5)
 
     entries[key] = entry
-
 
 settings_message = tk.Label(
     settings,
@@ -237,27 +289,21 @@ settings_message = tk.Label(
     bg="#edf2f7"
 )
 
-settings_message.grid(
-    row=2,
-    column=0,
-    columnspan=6
-)
+settings_message.grid(row=2, column=0, columnspan=6)
 
-# ==========================================
-# APPLY NEW THRESHOLDS
-# ==========================================
+
+# APPLY THRESHOLDS
+
 
 def apply_limits():
-
     global pending_limits
 
     try:
-
         if not ser or not ser.is_open:
             raise ValueError("Arduino is not connected")
 
         if pending_limits is not None:
-            raise ValueError("Previous threshold update is pending")
+            raise ValueError("Previous update is pending")
 
         new_limits = {
             "lux": float(entries["lux"].get()),
@@ -268,35 +314,19 @@ def apply_limits():
             "delta": float(entries["delta"].get())
         }
 
-        # Validate thresholds
-
         if new_limits["lux"] < 0:
             raise ValueError("Light threshold cannot be negative")
 
         if new_limits["temp_low"] >= new_limits["temp_high"]:
-            raise ValueError(
-                "Minimum temperature must be lower"
-            )
+            raise ValueError("Minimum temperature must be lower")
 
-        if new_limits["hum_low"] >= new_limits["hum_high"]:
-            raise ValueError(
-                "Minimum humidity must be lower"
-            )
-
-        if not (
-            0 <= new_limits["hum_low"] <= 100 and
-            0 <= new_limits["hum_high"] <= 100
-        ):
-            raise ValueError(
-                "Humidity limits must be 0–100"
-            )
+        if new_limits["hum_low"] < 0 or \
+           new_limits["hum_low"] >= new_limits["hum_high"] or \
+           new_limits["hum_high"] > 100:
+            raise ValueError("Invalid humidity limits")
 
         if new_limits["delta"] <= 0:
-            raise ValueError(
-                "Light change must be positive"
-            )
-
-        # Prepare serial command
+            raise ValueError("Light change must be positive")
 
         command = (
             f"LIMITS,"
@@ -308,13 +338,9 @@ def apply_limits():
             f"{new_limits['delta']}\n"
         )
 
-        print("Sending to Arduino:", command.strip())
-
-        # Send command
-
         pending_limits = new_limits.copy()
 
-        ser.write(command.encode("utf-8"))
+        ser.write(command.encode())
         ser.flush()
 
         settings_message.config(
@@ -322,19 +348,11 @@ def apply_limits():
             fg="#c47a00"
         )
 
-    except ValueError as e:
-
-        settings_message.config(
-            text=str(e),
-            fg="red"
-        )
-
-    except serial.SerialException as e:
-
+    except (ValueError, serial.SerialException) as e:
         pending_limits = None
 
         settings_message.config(
-            text="Serial error: " + str(e),
+            text=str(e),
             fg="red"
         )
 
@@ -343,16 +361,11 @@ ttk.Button(
     settings,
     text="Apply Thresholds",
     command=apply_limits
-).grid(
-    row=3,
-    column=0,
-    columnspan=6,
-    pady=8
-)
+).grid(row=3, column=0, columnspan=6, pady=8)
 
-# ==========================================
+
 # ALERT HISTORY
-# ==========================================
+
 
 history_frame = tk.LabelFrame(
     root,
@@ -370,174 +383,146 @@ history_frame.pack(
     pady=10
 )
 
-history = tk.Listbox(
-    history_frame,
-    height=7,
-    font=("Arial", 10)
-)
-
+history = tk.Listbox(history_frame, height=7)
 history.pack(fill="both", expand=True)
 
 
 def add_history(message):
+    timestamp = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
 
-    timestamp = datetime.now().strftime(
-        "%d-%m-%Y %H:%M:%S"
-    )
-
-    history.insert(
-        0,
-        timestamp + " - " + message
-    )
+    history.insert(0, timestamp + " - " + message)
 
     if history.size() > 30:
         history.delete(30)
 
 
-# ==========================================
+
 # PROCESS SENSOR READINGS
-# ==========================================
+
 
 def process_reading(data):
-
     global last_message
 
-    if "error" in data:
+    dht_available = data.get("dhtAvailable", True)
+    light_available = data.get("lightAvailable", True)
 
-        alert_status.config(
-            text="SENSOR ERROR: " + data["error"],
+    temperature = data.get("temperature")
+    humidity = data.get("humidity")
+    lux = data.get("lux")
+
+    # Display DHT22 readings
+    if dht_available and temperature is not None and humidity is not None:
+
+        temperature = float(temperature)
+        humidity = float(humidity)
+
+        temp_value.config(text=f"{temperature:.1f} °C")
+        hum_value.config(text=f"{humidity:.1f} %")
+
+    else:
+        temperature = None
+        humidity = None
+
+        temp_value.config(text="Unavailable")
+        hum_value.config(text="Unavailable")
+
+    # Display BH1750 reading
+    if light_available and lux is not None:
+
+        lux = float(lux)
+
+        lux_value.config(text=f"{lux:.1f} lux")
+
+        if data.get("lowLight", False):
+            light_status.config(
+                text="LOW LIGHT: Light is below threshold",
+                fg="#c47a00"
+            )
+        else:
+            light_status.config(
+                text="Light level is within range",
+                fg="green"
+            )
+
+    else:
+        lux = None
+
+        lux_value.config(text="Unavailable")
+
+        light_status.config(
+            text="BH1750 unavailable - light monitoring disabled",
             fg="red"
         )
 
-        return
-
-    required = [
-        "temperature",
-        "humidity",
-        "lux",
-        "lowLight",
-        "drasticChange"
-    ]
-
-    if not all(key in data for key in required):
-        print("Incomplete sensor data:", data)
-        return
-
-    try:
-
-        temperature = float(data["temperature"])
-        humidity = float(data["humidity"])
-        lux = float(data["lux"])
-
-        low_light = data["lowLight"]
-        drastic = data["drasticChange"]
-
-    except (ValueError, TypeError):
-        print("Invalid sensor data:", data)
-        return
-
-    # Update sensor cards
-
-    temp_value.config(
-        text=f"{temperature} °C"
-    )
-
-    hum_value.config(
-        text=f"{humidity} %"
-    )
-
-    lux_value.config(
-        text=f"{lux} lux"
-    )
-
-    # Light status
-
-    if low_light:
-
-        light_status.config(
-            text="LOW LIGHT: Plant may need more light",
-            fg="#c47a00"
-        )
-
-    else:
-
-        light_status.config(
-            text="Light level is within the configured range",
-            fg="green"
-        )
-
-    # Check climate conditions
-
+    # Check environmental alerts
     problems = []
 
-    if temperature < limits["temp_low"]:
-        problems.append("Temperature too low")
+    if temperature is not None and humidity is not None:
 
-    if temperature > limits["temp_high"]:
-        problems.append("Temperature too high")
+        if temperature < limits["temp_low"]:
+            problems.append("Temperature too low")
 
-    if humidity < limits["hum_low"]:
-        problems.append("Humidity too low")
+        if temperature > limits["temp_high"]:
+            problems.append("Temperature too high")
 
-    if humidity > limits["hum_high"]:
-        problems.append("Humidity too high")
+        if humidity < limits["hum_low"]:
+            problems.append("Humidity too low")
 
-    if drastic:
-        problems.append("Drastic change in light intensity")
+        if humidity > limits["hum_high"]:
+            problems.append("Humidity too high")
 
-    # Determine system status
+    if light_available and data.get("drasticChange", False):
+        problems.append("Drastic light change")
+
+    if not dht_available:
+        problems.append("DHT22 unavailable")
 
     if problems:
 
         message = "WARNING: " + ", ".join(problems)
 
-        alert_status.config(
-            text=message,
-            fg="red"
-        )
-
+        alert_status.config(text=message, fg="red")
         status = "ALERT"
 
     else:
 
-        message = "All monitored conditions are within limits"
+        message = "All available conditions are normal"
 
-        alert_status.config(
-            text=message,
-            fg="green"
-        )
-
+        alert_status.config(text=message, fg="green")
         status = "NORMAL"
 
-    # Record changed alerts
-
     if message != last_message:
-
         add_history(message)
-
         last_message = message
 
-    # Save sensor readings
+    # Save readings to CSV
+    with open(LOG_FILE, "a", newline="") as file:
 
-    with open(log_file, "a", newline="") as f:
-
-        writer = csv.writer(f)
+        writer = csv.writer(file)
 
         writer.writerow([
             datetime.now().isoformat(timespec="seconds"),
-            temperature,
-            humidity,
-            lux,
+            temperature if temperature is not None else "",
+            humidity if humidity is not None else "",
+            lux if lux is not None else "",
             status
         ])
 
+    # Upload to ThingSpeak when DHT22 is working
+    if temperature is not None and humidity is not None:
 
-# ==========================================
-# READ ARDUINO SERIAL DATA
-# ==========================================
+        upload_to_thingspeak(
+            temperature,
+            humidity,
+            lux
+        )
+
+
+
+# READ ARDUINO DATA
+
 
 def read_serial():
-
     global pending_limits
 
     if ser and ser.is_open:
@@ -556,8 +541,6 @@ def read_serial():
 
                 print("Arduino:", line)
 
-                # Successful threshold update
-
                 if line == "ACK:LIMITS":
 
                     if pending_limits is not None:
@@ -566,15 +549,9 @@ def read_serial():
                         pending_limits = None
 
                         settings_message.config(
-                            text="Arduino confirmed: Thresholds updated!",
+                            text="Thresholds updated successfully!",
                             fg="green"
                         )
-
-                    else:
-
-                        print("Unexpected threshold acknowledgement")
-
-                # Arduino rejected command
 
                 elif line.startswith("ERROR:"):
 
@@ -585,23 +562,23 @@ def read_serial():
                         fg="red"
                     )
 
-                # Normal JSON sensor readings
-
                 else:
 
                     try:
 
                         data = json.loads(line)
 
-                        process_reading(data)
+                        if "temperature" in data or \
+                           "dhtAvailable" in data:
 
-                        connection_label.config(
-                            text="Arduino connected",
-                            fg="green"
-                        )
+                            process_reading(data)
+
+                            connection_label.config(
+                                text="Arduino connected",
+                                fg="green"
+                            )
 
                     except json.JSONDecodeError:
-
                         print("Unknown Arduino message:", line)
 
         except serial.SerialException as e:
@@ -611,19 +588,14 @@ def read_serial():
                 fg="red"
             )
 
-            settings_message.config(
-                text="Serial error: " + str(e),
-                fg="red"
-            )
-
             print("Serial error:", e)
 
     root.after(200, read_serial)
 
 
-# ==========================================
-# CLOSE APPLICATION
-# ==========================================
+
+# CLOSE DASHBOARD
+
 
 def close_app():
 
@@ -633,13 +605,7 @@ def close_app():
     root.destroy()
 
 
-root.protocol(
-    "WM_DELETE_WINDOW",
-    close_app
-)
-
-# Start serial reading
+root.protocol("WM_DELETE_WINDOW", close_app)
 
 read_serial()
-
 root.mainloop()
