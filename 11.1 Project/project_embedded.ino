@@ -1,130 +1,33 @@
+
 #include <Wire.h>
 #include <BH1750.h>
 #include <DHT.h>
 
-#define DHTPIN 2
+#define DHTPIN 12
 #define DHTTYPE DHT22
 
-#define LIGHT_LED 3
-#define RED_LED 4
-
-#define DHT_INTERVAL 2000
+#define LIGHT_LED 11
+#define ALERT_LED 10
 
 DHT dht(DHTPIN, DHTTYPE);
 BH1750 lightMeter;
 
 // Default thresholds
-float minLux = 100.0;
-float minTemp = 18.0;
-float maxTemp = 32.0;
-float minHumidity = 30.0;
-float maxHumidity = 80.0;
-float drasticLuxChange = 300.0;
+float minLux = 100;
+float minTemp = 18;
+float maxTemp = 32;
+float minHumidity = 30;
+float maxHumidity = 80;
+float drasticLuxChange = 300;
 
 float previousLux = -1;
 
+bool lightAvailable = false;
+
 unsigned long lastRead = 0;
-
-// Receive threshold updates from Raspberry Pi
-
-void readCommands() {
-
-  if (!Serial.available()) {
-    return;
-  }
-
-  String command = Serial.readStringUntil('\n');
-  command.trim();
-
-  // Check command prefix
-  if (!command.startsWith("LIMITS,")) {
-    Serial.println("ERROR:INVALID_COMMAND");
-    return;
-  }
-
-  // Remove LIMITS,
-  command.remove(0, 7);
-
-  float values[6];
-
-  // Extract six comma-separated values
-  for (int i = 0; i < 6; i++) {
-
-    int comma = command.indexOf(',');
-
-    String token;
-
-    if (i < 5) {
-
-      if (comma == -1) {
-        Serial.println("ERROR:MISSING_VALUE");
-        return;
-      }
-
-      token = command.substring(0, comma);
-      command.remove(0, comma + 1);
-
-    } else {
-
-      if (comma != -1) {
-        Serial.println("ERROR:EXTRA_VALUE");
-        return;
-      }
-
-      token = command;
-    }
-
-    token.trim();
-
-    if (token.length() == 0) {
-      Serial.println("ERROR:EMPTY_VALUE");
-      return;
-    }
-
-    char* endPointer;
-    double parsed = strtod(token.c_str(), &endPointer);
-
-    if (endPointer == token.c_str() || *endPointer != '\0') {
-      Serial.println("ERROR:INVALID_VALUE");
-      return;
-    }
-
-    values[i] = parsed;
-  }
-
-  // Validate thresholds
-  float l = values[0];
-  float tl = values[1];
-  float th = values[2];
-  float hl = values[3];
-  float hh = values[4];
-  float delta = values[5];
-
-  if (l < 0 ||
-      tl >= th ||
-      hl >= hh ||
-      hl < 0 ||
-      hh > 100 ||
-      delta <= 0) {
-
-    Serial.println("ERROR:INVALID_LIMITS");
-    return;
-  }
-
-  // Apply new thresholds
-  minLux = l;
-  minTemp = tl;
-  maxTemp = th;
-  minHumidity = hl;
-  maxHumidity = hh;
-  drasticLuxChange = delta;
-
-  Serial.println("ACK:LIMITS");
-}
-
+unsigned long lastRetry = 0;
 
 void setup() {
-
   Serial.begin(9600);
   Serial.setTimeout(100);
 
@@ -132,85 +35,187 @@ void setup() {
   dht.begin();
 
   pinMode(LIGHT_LED, OUTPUT);
-  pinMode(RED_LED, OUTPUT);
+  pinMode(ALERT_LED, OUTPUT);
 
   digitalWrite(LIGHT_LED, LOW);
-  digitalWrite(RED_LED, LOW);
+  digitalWrite(ALERT_LED, LOW);
 
-  if (!lightMeter.begin(BH1750::CONTINUOUS_HIGH_RES_MODE)) {
-    Serial.println("{\"error\":\"BH1750 sensor not detected\"}");
-  }
+  // Start light sensor
+  lightAvailable = lightMeter.begin();
+
+  Serial.println("{\"system\":\"ready\"}");
 }
 
 void loop() {
 
-  readCommands();
+  // Receive new threshold values from Raspberry Pi
+  if (Serial.available()) {
 
-  if (millis() - lastRead >= DHT_INTERVAL) {
+    String command = Serial.readStringUntil('\n');
 
-    lastRead = millis();
+    if (command.startsWith("LIMITS,")) {
 
-    float temperature = dht.readTemperature();
-    float humidity = dht.readHumidity();
-    float lux = lightMeter.readLightLevel();
+      command.remove(0, 7);
 
-    if (isnan(temperature) ||
-        isnan(humidity) ||
-        isnan(lux) ||
-        lux < 0) {
+      float values[6];
 
-      digitalWrite(RED_LED, HIGH);
+      for (int i = 0; i < 6; i++) {
 
-      Serial.println(
-        "{\"error\":\"Sensor reading failed\"}"
-      );
+        int comma = command.indexOf(',');
 
-      return;
+        if (i < 5 && comma == -1) {
+          break;
+        }
+
+        String value;
+
+        if (i < 5) {
+          value = command.substring(0, comma);
+          command.remove(0, comma + 1);
+        } else {
+          value = command;
+        }
+
+        values[i] = value.toFloat();
+      }
+
+      if (values[1] < values[2] &&
+          values[3] < values[4] &&
+          values[4] <= 100 &&
+          values[0] >= 0 &&
+          values[5] > 0) {
+
+        minLux = values[0];
+        minTemp = values[1];
+        maxTemp = values[2];
+        minHumidity = values[3];
+        maxHumidity = values[4];
+        drasticLuxChange = values[5];
+
+        Serial.println("ACK:LIMITS");
+      } else {
+        Serial.println("ERROR:INVALID_LIMITS");
+      }
     }
+  }
 
-    bool lowLight = lux < minLux;
+  // Read sensors every 2 seconds
+  if (millis() - lastRead < 2000) {
+    return;
+  }
 
-    bool drasticChange = false;
+  lastRead = millis();
+
+  // Read DHT22
+  float temperature = dht.readTemperature();
+  float humidity = dht.readHumidity();
+
+  bool dhtAvailable =
+    !isnan(temperature) && !isnan(humidity);
+
+  // Check light sensor again every 10 seconds if unavailable
+  if (!lightAvailable && millis() - lastRetry >= 10000) {
+
+    lastRetry = millis();
+
+    lightAvailable = lightMeter.begin();
+  }
+
+  // Read BH1750 only when available
+  float lux = -1;
+
+  if (lightAvailable) {
+
+    lux = lightMeter.readLightLevel();
+
+    if (isnan(lux) || lux < 0) {
+      lightAvailable = false;
+      previousLux = -1;
+    }
+  }
+
+  // Check light conditions
+  bool lowLight = false;
+  bool drasticChange = false;
+
+  if (lightAvailable) {
+
+    lowLight = lux < minLux;
 
     if (previousLux >= 0) {
-
       drasticChange =
         abs(lux - previousLux) > drasticLuxChange;
     }
 
     previousLux = lux;
+  }
 
-    bool climateAlert =
+  // Check temperature and humidity
+  bool climateAlert = false;
+
+  if (dhtAvailable) {
+
+    climateAlert =
       temperature < minTemp ||
       temperature > maxTemp ||
       humidity < minHumidity ||
       humidity > maxHumidity;
-
-    bool alert = climateAlert || drasticChange;
-
-    // Control LEDs
-    digitalWrite(LIGHT_LED, lowLight ? HIGH : LOW);
-    digitalWrite(RED_LED, alert ? HIGH : LOW);
-
-    // Send sensor readings to Raspberry Pi
-    Serial.print("{\"temperature\":");
-    Serial.print(temperature, 1);
-
-    Serial.print(",\"humidity\":");
-    Serial.print(humidity, 1);
-
-    Serial.print(",\"lux\":");
-    Serial.print(lux, 1);
-
-    Serial.print(",\"lowLight\":");
-    Serial.print(lowLight ? "true" : "false");
-
-    Serial.print(",\"drasticChange\":");
-    Serial.print(drasticChange ? "true" : "false");
-
-    Serial.print(",\"alert\":");
-    Serial.print(alert ? "true" : "false");
-
-    Serial.println("}");
   }
+
+  bool alert = climateAlert || drasticChange;
+
+  // Control LEDs
+  digitalWrite(
+    LIGHT_LED,
+    lightAvailable && lowLight ? HIGH : LOW
+  );
+
+  digitalWrite(
+    ALERT_LED,
+    alert ? HIGH : LOW
+  );
+
+  // Send readings to Raspberry Pi
+  Serial.print("{");
+
+  Serial.print("\"dhtAvailable\":");
+  Serial.print(dhtAvailable ? "true" : "false");
+
+  Serial.print(",\"lightAvailable\":");
+  Serial.print(lightAvailable ? "true" : "false");
+
+  Serial.print(",\"temperature\":");
+
+  if (dhtAvailable) {
+    Serial.print(temperature);
+  } else {
+    Serial.print("null");
+  }
+
+  Serial.print(",\"humidity\":");
+
+  if (dhtAvailable) {
+    Serial.print(humidity);
+  } else {
+    Serial.print("null");
+  }
+
+  Serial.print(",\"lux\":");
+
+  if (lightAvailable) {
+    Serial.print(lux);
+  } else {
+    Serial.print("null");
+  }
+
+  Serial.print(",\"lowLight\":");
+  Serial.print(lowLight ? "true" : "false");
+
+  Serial.print(",\"drasticChange\":");
+  Serial.print(drasticChange ? "true" : "false");
+
+  Serial.print(",\"alert\":");
+  Serial.print(alert ? "true" : "false");
+
+  Serial.println("}");
 }
